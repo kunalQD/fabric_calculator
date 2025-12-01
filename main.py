@@ -9,7 +9,7 @@ from reportlab.lib import colors
 import io
 
 st.set_page_config(layout="wide")
-st.title("Curtain Quantity Calculator – PDF Order Form (Final)")
+st.title("Curtain Quantity Calculator – PDF Order Form (Updated with Panels)")
 
 # ---------------------------
 # SESSION STATE DEFAULTS
@@ -101,6 +101,22 @@ def calculate_sqft_for_roman_or_regular(width, height, stitch):
         return w_blocks * h_blocks
     return None
 
+def calculate_panels(stitch, width):
+    """
+    Panels only for Pleated, Ripple, Eyelet:
+    - Pleated -> round(width / 18)
+    - Ripple  -> round(width / 20)
+    - Eyelet  -> round(width / 24)
+    For others return None.
+    """
+    if stitch == "Pleated":
+        return int(round(width / 18, 0))
+    if stitch == "Ripple":
+        return int(round(width / 20, 0))
+    if stitch == "Eyelet":
+        return int(round(width / 24, 0))
+    return None
+
 # ---------------------------
 # CALLBACKS
 # ---------------------------
@@ -113,16 +129,17 @@ def add_window_callback():
     qty = calculate_quantity(stitch, w, h)
     track_ft = calculate_track_ft(w, stitch)
     sqft = calculate_sqft_for_roman_or_regular(w, h, stitch)
+    panels = calculate_panels(stitch, w)
 
-    # For consistency in storage, store numeric 0 as 0 and None as None
     entry = {
         "Window": name,
         "Stitch Type": stitch,
         "Width (inches)": w,
         "Height (inches)": h,
-        "Quantity": qty if is_number(qty) and qty != 0 else (0 if stitch in ["Pleated","Ripple","Eyelet","Roman Blinds 48\"","Roman Blinds 54\""] else 0),
+        "Quantity": qty if is_number(qty) else 0,
         "Track (ft)": track_ft,
-        "SQFT": sqft
+        "SQFT": sqft,
+        "Panels": panels
     }
 
     st.session_state["entries"].append(entry)
@@ -186,6 +203,7 @@ if st.session_state["entries"]:
     total_qty = 0.0
     total_track = 0.0
     total_sqft = 0.0
+    total_panels = 0
 
     for e in st.session_state["entries"]:
         q = e.get("Quantity")
@@ -200,14 +218,34 @@ if st.session_state["entries"]:
         if is_number(s):
             total_sqft += float(s)
 
+        p = e.get("Panels")
+        if is_number(p):
+            total_panels += int(p)
+
     # Display table
-    st.dataframe(df, use_container_width=True)
+    # Show numeric fields formatted for neatness
+    display_df = df.copy()
+    # Format None -> "-" for display
+    display_df["Track (ft)"] = display_df["Track (ft)"].apply(lambda x: f"{x:.1f} ft" if is_number(x) else "-")
+    display_df["SQFT"] = display_df["SQFT"].apply(lambda x: int(x) if is_number(x) else "-")
+    display_df["Panels"] = display_df["Panels"].apply(lambda x: int(x) if is_number(x) else "-")
+    # Quantity formatting: show 2 decimals if fractional, else integer
+    def fmt_qty(x):
+        if is_number(x):
+            if isinstance(x, float) and not float(x).is_integer():
+                return f"{x:.2f}"
+            return f"{int(x)}"
+        return "-"
+    display_df["Quantity"] = display_df["Quantity"].apply(fmt_qty)
+
+    st.dataframe(display_df, use_container_width=True)
 
     # Totals display
-    t1, t2, t3 = st.columns(3)
+    t1, t2, t3, t4 = st.columns(4)
     t1.metric("Total Fabric Quantity", f"{total_qty:.2f}" if not float(total_qty).is_integer() else f"{int(total_qty)}")
     t2.metric("Total Track (ft)", f"{total_track:.1f} ft")
     t3.metric("Total SQFT (Roman & Regular Blinds)", f"{total_sqft:.1f} sq.ft")
+    t4.metric("Total Panels (Pleated/Ripple/Eyelet)", f"{total_panels}")
 
     # RESET BUTTON
     st.button("Reset Everything", on_click=reset_everything_callback)
@@ -256,6 +294,7 @@ if st.session_state["entries"]:
             total_qty_pdf = 0.0
             total_track_pdf = 0.0
             total_sqft_pdf = 0.0
+            total_panels_pdf = 0
 
             for entry in st.session_state["entries"]:
                 story.append(Paragraph(f"<b><font size=14>{entry['Window']}</font></b>", styles["Heading2"]))
@@ -263,12 +302,10 @@ if st.session_state["entries"]:
 
                 # Prepare display values
                 qty_display = entry.get("Quantity", 0)
-                qty_str = ""
+                qty_str = "-"
                 if is_number(qty_display):
                     total_qty_pdf += float(qty_display)
                     qty_str = f"{qty_display:.2f}" if (isinstance(qty_display, float) and not float(qty_display).is_integer()) else f"{int(qty_display)}"
-                else:
-                    qty_str = "-"
 
                 track_val = entry.get("Track (ft)")
                 track_str = "-"
@@ -282,19 +319,26 @@ if st.session_state["entries"]:
                     total_sqft_pdf += float(sqft_val)
                     sqft_str = f"{int(sqft_val)} sq.ft"
 
+                panels_val = entry.get("Panels")
+                panels_str = "-"
+                if is_number(panels_val):
+                    total_panels_pdf += int(panels_val)
+                    panels_str = f"{int(panels_val)}"
+
                 table_data = [
                     ["Stitch Type", entry["Stitch Type"]],
                     ["Width (inches)", entry["Width (inches)"]],
                     ["Height (inches)", entry["Height (inches)"]],
                     ["Quantity", qty_str],
                     ["Track (ft)", track_str],
-                    ["SQFT", sqft_str]
+                    ["SQFT", sqft_str],
+                    ["Panels", panels_str]
                 ]
-                table = Table(table_data, colWidths=[140, 320])
+                table = Table(table_data, colWidths=[120, 340])
                 table.setStyle(TableStyle([
                     ('BACKGROUND', (0, 0), (1, 0), colors.lightgrey),
                     ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-                    ('FONT', (0,0), (-1,-1), 'Helvetica', 11),
+                    ('FONT', (0,0), (-1,-1), 'Helvetica', 10),
                 ]))
                 story.append(table)
                 story.append(Spacer(1, 12))
@@ -304,7 +348,8 @@ if st.session_state["entries"]:
             totals_table = [
                 ["Total Fabric Quantity", f"{total_qty_pdf:.2f}" if not float(total_qty_pdf).is_integer() else f"{int(total_qty_pdf)}"],
                 ["Total Track (ft)", f"{total_track_pdf:.1f} ft"],
-                ["Total SQFT (Roman & Regular Blinds)", f"{total_sqft_pdf:.1f} sq.ft"]
+                ["Total SQFT (Roman & Regular Blinds)", f"{total_sqft_pdf:.1f} sq.ft"],
+                ["Total Panels (Pleated/Ripple/Eyelet)", f"{total_panels_pdf}"]
             ]
             totals_tbl = Table(totals_table, colWidths=[260, 200])
             totals_tbl.setStyle(TableStyle([
