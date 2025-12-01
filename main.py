@@ -3,13 +3,21 @@ import pandas as pd
 import math
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    Image as RLImage,
+)
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
+from reportlab.lib.units import inch
 import io
 
 st.set_page_config(layout="wide")
-st.title("Curtain Quantity Calculator – PDF Order Form (Updated with Panels)")
+st.title("Curtain Quantity Calculator – PDF Order Form (Form + Images)")
 
 # ---------------------------
 # SESSION STATE DEFAULTS
@@ -19,7 +27,7 @@ if "entries" not in st.session_state:
 if "confirm_save" not in st.session_state:
     st.session_state["confirm_save"] = False
 
-# default widget values (must be set BEFORE creating widgets)
+# widget-backed defaults (safe BEFORE creating widgets)
 if "window_name" not in st.session_state:
     st.session_state["window_name"] = ""
 if "stitch_type" not in st.session_state:
@@ -28,6 +36,9 @@ if "width" not in st.session_state:
     st.session_state["width"] = 0.0
 if "height" not in st.session_state:
     st.session_state["height"] = 0.0
+
+# NOTE: We DO NOT create or assign a session_state key for the file_uploader.
+# The uploader lives inside the form and we read its return value directly.
 
 # ---------------------------
 # HELPER / CALCULATION FUNCTIONS
@@ -40,15 +51,7 @@ def calculate_height_factor(height):
     return round((height + 14) / 39, 2)
 
 def calculate_quantity(stitch, width, height):
-    """
-    Returns quantity according to stitch rules:
-    - Pleated: round(width/18,0) * round((height+14)/39,2)
-    - Ripple: round(width/20,0) * round((height+14)/39,2)
-    - Eyelet: round(width/24,0) * round((height+14)/39,2)
-    - Roman Blinds 48": panels = ceil(width/44); qty = round(panels * h)
-    - Roman Blinds 54": panels = ceil(width/50); qty = round(panels * h)
-    - Blinds (Regular): do not calculate fabric qty (return 0)
-    """
+    """Quantity rules per stitch type."""
     h = calculate_height_factor(height)
 
     if stitch == "Pleated":
@@ -64,15 +67,14 @@ def calculate_quantity(stitch, width, height):
         return w * h
 
     if stitch == 'Roman Blinds 48"':
-        panels = math.ceil(width / 44.0)
+        panels = math.ceil(width / 44.0)  # round up
         return round(panels * h)
 
     if stitch == 'Roman Blinds 54"':
-        panels = math.ceil(width / 50.0)
+        panels = math.ceil(width / 50.0)  # round up
         return round(panels * h)
 
     if stitch == "Blinds (Regular)":
-        # do not calculate fabric quantity for regular blinds
         return 0
 
     return 0
@@ -81,19 +83,17 @@ def calculate_track_ft(width, stitch):
     """
     Track in feet = width / 12,
     then round up to nearest 0.5 ft (ceiling to 0.5 increments).
-    For Roman Blinds and Blinds (Regular) -> no track (return None)
+    No track for Roman/Regular blinds.
     """
     if stitch in ['Roman Blinds 48"', 'Roman Blinds 54"', 'Blinds (Regular)']:
         return None
     ft = width / 12.0
-    ft_rounded = math.ceil(ft * 2) / 2.0
-    return ft_rounded
+    return math.ceil(ft * 2.0) / 2.0
 
 def calculate_sqft_for_roman_or_regular(width, height, stitch):
     """
-    For Roman Blinds and Blinds (Regular) compute SQFT:
+    For Roman & Regular blinds compute SQFT:
     round(width/12) * round(height/12)
-    Otherwise return None.
     """
     if stitch in ['Roman Blinds 48"', 'Roman Blinds 54"', 'Blinds (Regular)']:
         w_blocks = round(width / 12.0)
@@ -104,10 +104,9 @@ def calculate_sqft_for_roman_or_regular(width, height, stitch):
 def calculate_panels(stitch, width):
     """
     Panels only for Pleated, Ripple, Eyelet:
-    - Pleated -> round(width / 18)
-    - Ripple  -> round(width / 20)
-    - Eyelet  -> round(width / 24)
-    For others return None.
+    Pleated -> round(width / 18)
+    Ripple  -> round(width / 20)
+    Eyelet  -> round(width / 24)
     """
     if stitch == "Pleated":
         return int(round(width / 18, 0))
@@ -118,18 +117,70 @@ def calculate_panels(stitch, width):
     return None
 
 # ---------------------------
-# CALLBACKS
+# Reset callback
 # ---------------------------
-def add_window_callback():
-    stitch = st.session_state["stitch_type"]
-    w = st.session_state["width"]
-    h = st.session_state["height"]
-    name = st.session_state["window_name"]
+def reset_everything_callback():
+    st.session_state["entries"] = []
+    st.session_state["confirm_save"] = False
+    # Reset widget defaults (if desired)
+    st.session_state["window_name"] = ""
+    st.session_state["stitch_type"] = "Pleated"
+    st.session_state["width"] = 0.0
+    st.session_state["height"] = 0.0
+    # Force rerun to clear UI
+    st.rerun()
+
+# ---------------------------
+# INPUT SECTION (form-based: uploader has no key)
+# ---------------------------
+st.header("Add Window Details")
+
+with st.form("add_window_form", clear_on_submit=False):
+    window_name_in = st.text_input("Window Name / Description")
+    stitch_type_in = st.selectbox(
+        "Stitch Type",
+        [
+            "Pleated",
+            "Ripple",
+            "Eyelet",
+            'Roman Blinds 48"',
+            'Roman Blinds 54"',
+            "Blinds (Regular)",
+        ],
+        index=0,
+    )
+    width_in = st.number_input("Width (in inches)", min_value=0.0, step=0.1, value=0.0)
+    height_in = st.number_input("Height (in inches)", min_value=0.0, step=0.1, value=0.0)
+
+    # IMPORTANT: No 'key' here. We read the returned list directly on submit.
+    uploaded_files = st.file_uploader(
+        "Upload window images (optional) — multiple allowed",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+    )
+
+    submitted = st.form_submit_button("Add Window")
+
+if submitted:
+    # prepare values
+    stitch = stitch_type_in
+    w = float(width_in)
+    h = float(height_in)
+    name = window_name_in.strip() or "Window"
 
     qty = calculate_quantity(stitch, w, h)
     track_ft = calculate_track_ft(w, stitch)
     sqft = calculate_sqft_for_roman_or_regular(w, h, stitch)
     panels = calculate_panels(stitch, w)
+
+    # read images into bytes
+    images_bytes = []
+    if uploaded_files:
+        for f in uploaded_files:
+            try:
+                images_bytes.append(f.read())
+            except Exception:
+                continue
 
     entry = {
         "Window": name,
@@ -139,65 +190,31 @@ def add_window_callback():
         "Quantity": qty if is_number(qty) else 0,
         "Track (ft)": track_ft,
         "SQFT": sqft,
-        "Panels": panels
+        "Panels": panels,
+        "Images": images_bytes,
     }
 
     st.session_state["entries"].append(entry)
 
-    # Reset input widgets by updating session_state values (safe inside callback)
-    st.session_state["window_name"] = ""
-    st.session_state["stitch_type"] = "Pleated"
-    st.session_state["width"] = 0.0
-    st.session_state["height"] = 0.0
-
-    # ensure confirm_save is reset
-    st.session_state["confirm_save"] = False
-
-def reset_everything_callback():
-    st.session_state["entries"] = []
-    st.session_state["confirm_save"] = False
-    st.session_state["window_name"] = ""
-    st.session_state["stitch_type"] = "Pleated"
-    st.session_state["width"] = 0.0
-    st.session_state["height"] = 0.0
-
-def enable_confirm_callback():
-    st.session_state["confirm_save"] = True
-
-# ---------------------------
-# INPUT SECTION (use keys)
-# ---------------------------
-st.header("Add Window Details")
-col1, col2 = st.columns([3,1])
-
-with col1:
-    window_name = st.text_input("Window Name / Description", key="window_name")
-    stitch_type = st.selectbox(
-        "Stitch Type",
-        [
-            "Pleated",
-            "Ripple",
-            "Eyelet",
-            'Roman Blinds 48"',
-            'Roman Blinds 54"',
-            "Blinds (Regular)"
-        ],
-        key="stitch_type"
-    )
-    width = st.number_input("Width (in inches)", min_value=0.0, step=0.1, key="width")
-    height = st.number_input("Height (in inches)", min_value=0.0, step=0.1, key="height")
-
-with col2:
-    st.write("")  # spacer
-    st.write("")
-    st.button("Add Window", on_click=add_window_callback)
+    st.success(f"Added: {name} — Qty: {qty} — Images: {len(images_bytes)}")
+    # rerun to clear the form (including uploader)
+    st.rerun()
 
 # ---------------------------
 # DISPLAY TABLE + TOTALS
 # ---------------------------
 st.header("Windows Added (Not Saved Yet)")
+
 if st.session_state["entries"]:
-    df = pd.DataFrame(st.session_state["entries"])
+    # Prepare DataFrame for display (exclude raw image bytes)
+    rows_for_df = []
+    for e in st.session_state["entries"]:
+        row = e.copy()
+        row["Image Count"] = len(row.get("Images", []))
+        row.pop("Images", None)
+        rows_for_df.append(row)
+
+    df = pd.DataFrame(rows_for_df)
 
     # Compute totals
     total_qty = 0.0
@@ -222,33 +239,33 @@ if st.session_state["entries"]:
         if is_number(p):
             total_panels += int(p)
 
-    # Display table
-    # Show numeric fields formatted for neatness
+    # Display formatted DataFrame
     display_df = df.copy()
-    # Format None -> "-" for display
     display_df["Track (ft)"] = display_df["Track (ft)"].apply(lambda x: f"{x:.1f} ft" if is_number(x) else "-")
     display_df["SQFT"] = display_df["SQFT"].apply(lambda x: int(x) if is_number(x) else "-")
     display_df["Panels"] = display_df["Panels"].apply(lambda x: int(x) if is_number(x) else "-")
-    # Quantity formatting: show 2 decimals if fractional, else integer
+
     def fmt_qty(x):
         if is_number(x):
             if isinstance(x, float) and not float(x).is_integer():
                 return f"{x:.2f}"
             return f"{int(x)}"
         return "-"
+
     display_df["Quantity"] = display_df["Quantity"].apply(fmt_qty)
 
     st.dataframe(display_df, use_container_width=True)
 
     # Totals display
-    t1, t2, t3, t4 = st.columns(4)
-    t1.metric("Total Fabric Quantity", f"{total_qty:.2f}" if not float(total_qty).is_integer() else f"{int(total_qty)}")
-    t2.metric("Total Track (ft)", f"{total_track:.1f} ft")
-    t3.metric("Total SQFT (Roman & Regular Blinds)", f"{total_sqft:.1f} sq.ft")
-    t4.metric("Total Panels (Pleated/Ripple/Eyelet)", f"{total_panels}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Fabric Quantity", f"{total_qty:.2f}" if not float(total_qty).is_integer() else f"{int(total_qty)}")
+    c2.metric("Total Track (ft)", f"{total_track:.1f} ft")
+    c3.metric("Total SQFT (Roman & Regular Blinds)", f"{total_sqft:.1f} sq.ft")
+    c4.metric("Total Panels (Pleated/Ripple/Eyelet)", f"{total_panels}")
 
-    # RESET BUTTON
-    st.button("Reset Everything", on_click=reset_everything_callback)
+    # Reset button (clears and reruns)
+    if st.button("Reset Everything"):
+        reset_everything_callback()
 else:
     st.info("No entries added yet.")
 
@@ -258,7 +275,8 @@ else:
 st.header("Save as PDF Order Form")
 
 if st.session_state["entries"]:
-    st.button("Generate PDF", on_click=enable_confirm_callback)
+    if st.button("Generate PDF"):
+        st.session_state["confirm_save"] = True
 
     if st.session_state["confirm_save"]:
         st.subheader("Customer Details")
@@ -274,8 +292,7 @@ if st.session_state["entries"]:
             story = []
 
             # PDF Title
-            title = Paragraph("<b><font size=18>Order Form</font></b>", styles["Title"])
-            story.append(title)
+            story.append(Paragraph("<b><font size=18>Order Form</font></b>", styles["Title"]))
             story.append(Spacer(1, 12))
 
             # Customer Info
@@ -288,9 +305,9 @@ if st.session_state["entries"]:
                 </font>
             """
             story.append(Paragraph(customer_info, styles["Normal"]))
-            story.append(Spacer(1, 20))
+            story.append(Spacer(1, 12))
 
-            # Loop through window entries
+            # Loop through window entries and add tables + images
             total_qty_pdf = 0.0
             total_track_pdf = 0.0
             total_sqft_pdf = 0.0
@@ -332,7 +349,7 @@ if st.session_state["entries"]:
                     ["Quantity", qty_str],
                     ["Track (ft)", track_str],
                     ["SQFT", sqft_str],
-                    ["Panels", panels_str]
+                    ["Panels", panels_str],
                 ]
                 table = Table(table_data, colWidths=[120, 340])
                 table.setStyle(TableStyle([
@@ -341,6 +358,21 @@ if st.session_state["entries"]:
                     ('FONT', (0,0), (-1,-1), 'Helvetica', 10),
                 ]))
                 story.append(table)
+                story.append(Spacer(1, 8))
+
+                # Add images (if any)
+                images = entry.get("Images", [])
+                if images:
+                    for img_bytes in images:
+                        try:
+                            img_buffer = io.BytesIO(img_bytes)
+                            img = RLImage(img_buffer, width=2.5 * inch, height=2.5 * inch)
+                            story.append(img)
+                            story.append(Spacer(1, 6))
+                        except Exception:
+                            # skip images that can't be processed
+                            continue
+
                 story.append(Spacer(1, 12))
 
             # Totals section in PDF
@@ -371,5 +403,6 @@ if st.session_state["entries"]:
             )
 
             st.success("PDF Generated!")
+
 else:
     st.info("Add at least one window to enable PDF creation.")
