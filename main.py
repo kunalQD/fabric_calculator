@@ -17,7 +17,7 @@ from reportlab.lib.units import inch
 import io
 
 st.set_page_config(layout="wide")
-st.title("Curtain Quantity Calculator – PDF Order Form (Form + Images)")
+st.title("Curtain Fabric Calculator")
 
 # ---------------------------
 # SESSION STATE DEFAULTS
@@ -406,3 +406,4 @@ if st.session_state["entries"]:
 
 else:
     st.info("Add at least one window to enable PDF creation.")
+
