@@ -93,11 +93,17 @@ def calculate_track_ft(width, stitch):
 def calculate_sqft_for_roman_or_regular(width, height, stitch):
     """
     For Roman & Regular blinds compute SQFT:
-    round(width/12) * round(height/12)
+    - width/12 and height/12
+    - ceiling each to the next 0.5 (e.g. 8.01 -> 8.5)
+    - multiply => sqft (can be fractional)
     """
     if stitch in ['Roman Blinds 48"', 'Roman Blinds 54"', 'Blinds (Regular)']:
-        w_blocks = round(width / 12.0)
-        h_blocks = round(height / 12.0)
+        def ceil_to_half(value):
+            return math.ceil(value * 2.0) / 2.0
+        w_ft = width / 12.0
+        h_ft = height / 12.0
+        w_blocks = ceil_to_half(w_ft)
+        h_blocks = ceil_to_half(h_ft)
         return w_blocks * h_blocks
     return None
 
@@ -242,7 +248,12 @@ if st.session_state["entries"]:
     # Display formatted DataFrame
     display_df = df.copy()
     display_df["Track (ft)"] = display_df["Track (ft)"].apply(lambda x: f"{x:.1f} ft" if is_number(x) else "-")
-    display_df["SQFT"] = display_df["SQFT"].apply(lambda x: int(x) if is_number(x) else "-")
+    # SQFT may be fractional; show one decimal if fractional, else int
+    def fmt_sqft(x):
+        if is_number(x):
+            return f"{x:.1f}" if not float(x).is_integer() else f"{int(x)}"
+        return "-"
+    display_df["SQFT"] = display_df["SQFT"].apply(fmt_sqft)
     display_df["Panels"] = display_df["Panels"].apply(lambda x: int(x) if is_number(x) else "-")
 
     def fmt_qty(x):
@@ -334,7 +345,7 @@ if st.session_state["entries"]:
                 sqft_str = "-"
                 if is_number(sqft_val):
                     total_sqft_pdf += float(sqft_val)
-                    sqft_str = f"{int(sqft_val)} sq.ft"
+                    sqft_str = f"{sqft_val:.1f} sq.ft"
 
                 panels_val = entry.get("Panels")
                 panels_str = "-"
@@ -406,4 +417,3 @@ if st.session_state["entries"]:
 
 else:
     st.info("Add at least one window to enable PDF creation.")
-
