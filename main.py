@@ -40,7 +40,7 @@ except Exception:
 # -------------------------
 # Configuration
 # -------------------------
-MONGO_URI = os.getenv("MONGO_URI")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://kunal-qd:Password_5202@cluster0.zem6dyp.mongodb.net/?appName=Cluster0")
 MONGO_DBNAME = os.getenv("MONGO_DB", "fabric_app")
 # Default to GridFS enabled — if user explicitly sets USE_GRIDFS=0 then we disable
 USE_GRIDFS = not (os.getenv("USE_GRIDFS", "").strip() in ("0", "false", "False"))
