@@ -13,11 +13,11 @@ This version forces GridFS by default (USE_GRIDFS=True), but respects USE_GRIDFS
 
 import os
 import io
-import json
 import uuid
 import math
 from datetime import datetime
 from pathlib import Path
+from collections import defaultdict
 
 import streamlit as st
 import pandas as pd
@@ -339,33 +339,57 @@ def generate_pdf_bytes(customer, entries):
     """, styles["Normal"]))
     story.append(Spacer(1, 12))
 
+    # group entries by base window name (before " - Layer")
+    groups = defaultdict(list)
     for e in entries:
-        story.append(Paragraph(f"<b>{e['Window']}</b>", styles["Heading2"]))
+        win_full = e.get("Window", "Window")
+        if " - Layer " in win_full:
+            base = win_full.split(" - Layer ")[0]
+        else:
+            base = win_full
+        groups[base].append(e)
 
-        tbl = Table([
-            ["Stitch Type", e["Stitch Type"]],
-            ["Width", e["Width (inches)"]],
-            ["Height", e["Height (inches)"]],
-            ["Quantity", e["Quantity"]],
-            ["Track (ft)", e["Track (ft)"]],
-            ["SQFT", e["SQFT"]],
-            ["Panels", e["Panels"]],
-        ], colWidths=[150, 300])
+    for base, rows in groups.items():
+        story.append(Paragraph(f"<b>{base}</b>", styles["Heading2"]))
+        # Lining: take from first row if present
+        lining = rows[0].get("Lining", "No Lining")
+        story.append(Paragraph(f"<b>Lining:</b> {lining}", styles["Normal"]))
+        story.append(Spacer(1, 6))
 
-        tbl.setStyle(TableStyle([
-            ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
-            ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
-        ]))
-        story.append(tbl)
+        for r in sorted(rows, key=lambda x: x.get("Layer", 1) if isinstance(x.get("Layer", None), int) else 1):
+            layer_label = f"Layer {r.get('Layer',1)}"
+            story.append(Paragraph(f"<b>{layer_label}</b>", styles["Heading3"]))
+            tbl = Table([
+                ["Stitch Type", r.get("Stitch Type")],
+                ["Width", r.get("Width (inches)")],
+                ["Height", r.get("Height (inches)")],
+                ["Quantity", r.get("Quantity")],
+                ["Track (ft)", r.get("Track (ft)")],
+                ["SQFT", r.get("SQFT")],
+                ["Panels", r.get("Panels")]
+            ], colWidths=[150, 300])
+            tbl.setStyle(TableStyle([("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+                                     ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke)]))
+            story.append(tbl)
+            story.append(Spacer(1, 6))
+
+        # images: show first non-empty image set across rows (since images duplicated)
+        shown = False
+        for r in rows:
+            imgs = r.get("Images", []) or []
+            if imgs:
+                for img in imgs:
+                    try:
+                        img_buff = io.BytesIO(img)
+                        story.append(RLImage(img_buff, width=2.5*inch, height=2.5*inch))
+                        story.append(Spacer(1, 6))
+                        shown = True
+                    except Exception:
+                        pass
+                if shown:
+                    break
+
         story.append(Spacer(1, 10))
-
-        for img in e.get("Images", []):
-            try:
-                img_buff = io.BytesIO(img)
-                story.append(RLImage(img_buff, width=2.5*inch, height=2.5*inch))
-                story.append(Spacer(1, 6))
-            except Exception:
-                pass
 
     pdf.build(story)
     buffer.seek(0)
@@ -439,61 +463,325 @@ if load_choice.startswith("Yes"):
 # Add/Edit Window form
 st.header("Add / Edit Window Details")
 
-edit_idx = st.session_state.get("edit_index")
-if edit_idx is not None and 0 <= edit_idx < len(st.session_state["entries"]):
-    e_prefill = st.session_state["entries"][edit_idx]
-else:
-    e_prefill = None
+# Helper to find paired layer indexes by base window name
+def find_pair_indexes_by_base(base_name):
+    """Return (idx_layer1, idx_layer2) if both present, else (idx_single, None) or (None,None)."""
+    idx1 = idx2 = None
+    for i, e in enumerate(st.session_state["entries"]):
+        w = e.get("Window", "")
+        if w == base_name:
+            # exact match single-layer window
+            idx1 = i
+            return idx1, None
+        if " - Layer " in w:
+            base = w.split(" - Layer ")[0]
+            if base == base_name:
+                layer_num = w.split(" - Layer ")[1]
+                if layer_num.startswith("1"):
+                    idx1 = i
+                elif layer_num.startswith("2"):
+                    idx2 = i
+    # If found both, return them (order can vary)
+    return idx1, idx2
 
+# Determine edit context
+edit_idx = st.session_state.get("edit_index")
+e_prefill = None
+editing_pair_base = None
+pair_indexes = (None, None)
+if edit_idx is not None and 0 <= edit_idx < len(st.session_state["entries"]):
+    # Determine base name for the selected row, and check whether it's part of a pair
+    selected = st.session_state["entries"][edit_idx]
+    sel_win = selected.get("Window", "")
+    if " - Layer " in sel_win:
+        base = sel_win.split(" - Layer ")[0]
+    else:
+        base = sel_win
+    # find pair indexes (could be single)
+    idx_a, idx_b = find_pair_indexes_by_base(base)
+    pair_indexes = (idx_a, idx_b)
+    # If both layers present, set e_prefill to a dict combining info for the window form
+    if idx_a is not None and idx_b is not None:
+        # We will load main = layer1 (prefer idx with Layer 1), sheer = layer2
+        # find which index corresponds to layer1/layer2
+        layer1_idx = layer2_idx = None
+        for i in (idx_a, idx_b):
+            if i is None:
+                continue
+            w = st.session_state["entries"][i].get("Window","")
+            if " - Layer 1" in w:
+                layer1_idx = i
+            elif " - Layer 2" in w:
+                layer2_idx = i
+        # fallback: if layer1 not found, pick the lower index as main
+        if layer1_idx is None and layer2_idx is not None:
+            # pick other as layer1
+            layer1_idx = layer2_idx
+            layer2_idx = None
+        if layer1_idx is not None:
+            e_prefill = st.session_state["entries"][layer1_idx].copy()
+            editing_pair_base = base
+        else:
+            e_prefill = st.session_state["entries"][edit_idx].copy()
+    else:
+        # single-row edit
+        e_prefill = st.session_state["entries"][edit_idx].copy()
+
+# Radio key per-window (new vs editing index)
+radio_key = f"ui_double_radio_{edit_idx if edit_idx is not None else 'new'}"
+
+# If a previous add requested reset for the new form, apply BEFORE widget creation (allowed)
+if st.session_state.get("_reset_new_form", False) and radio_key == "ui_double_radio_new":
+    st.session_state[radio_key] = "No"
+    try:
+        del st.session_state["_reset_new_form"]
+    except Exception:
+        pass
+
+# If key not initialized, set default value (editing pair -> Yes else No)
+if radio_key not in st.session_state:
+    if editing_pair_base:
+        st.session_state[radio_key] = "Yes"
+    else:
+        st.session_state[radio_key] = "No"
+
+# Render the per-window radio outside the form so its state updates immediately
+st.radio("Double layer?", ["No", "Yes"],
+         index=0 if st.session_state.get(radio_key, "No") == "No" else 1,
+         key=radio_key,
+         horizontal=True)
+
+# Build the form; it will read st.session_state[radio_key] for is_double
 with st.form("win_form", clear_on_submit=False):
+    # Window name — prefill from e_prefill if editing
     win_name = st.text_input("Window Name", value=e_prefill["Window"] if e_prefill else "")
-    stitch = st.selectbox("Stitch Type", [
+
+    # Main layer inputs (prefill from e_prefill)
+    st.subheader("Main Layer")
+    main_stitch_default = e_prefill["Stitch Type"] if e_prefill else "Pleated"
+    main_width_default = e_prefill["Width (inches)"] if e_prefill else 0.0
+    main_height_default = e_prefill["Height (inches)"] if e_prefill else 0.0
+
+    main_stitch = st.selectbox("Main layer stitch type", [
         "Pleated", "Ripple", "Eyelet",
         'Roman Blinds 48"', 'Roman Blinds 54"',
         "Blinds (Regular)"
-    ], index=["Pleated","Ripple","Eyelet",'Roman Blinds 48"','Roman Blinds 54"',"Blinds (Regular)"].index(e_prefill["Stitch Type"]) if e_prefill else 0)
-    width = st.number_input("Width (inches)", min_value=0.0, value=e_prefill["Width (inches)"] if e_prefill else 0.0)
-    height = st.number_input("Height (inches)", min_value=0.0, value=e_prefill["Height (inches)"] if e_prefill else 0.0)
+    ], index=["Pleated", "Ripple", "Eyelet",'Roman Blinds 48"','Roman Blinds 54"',"Blinds (Regular)"].index(main_stitch_default) if main_stitch_default in ["Pleated","Ripple","Eyelet",'Roman Blinds 48"','Roman Blinds 54"',"Blinds (Regular)"] else 0, key="main_stitch")
+
+    main_width = st.number_input("Main layer width (inches)", min_value=0.0, value=float(main_width_default or 0.0), step=0.5, key="main_w")
+    main_height = st.number_input("Main layer height (inches)", min_value=0.0, value=float(main_height_default or 0.0), step=0.5, key="main_h")
+
+    st.markdown("---")
+
+    # Determine is_double from per-window radio key
+    is_double = (st.session_state.get(radio_key, "No") == "Yes")
+
+    # Sheer layer inputs (disabled when not double; mirrored on submit)
+    if is_double:
+        st.subheader("Sheer Layer (enabled)")
+    else:
+        st.subheader("Sheer Layer (disabled — will mirror Main layer)")
+
+    # If editing a pair, prefill sheer fields from layer2 entry if present
+    sheer_stitch_default = "Pleated"
+    sheer_w_default = main_width if not is_double else 0.0
+    sheer_h_default = main_height if not is_double else 0.0
+
+    # If editing a pair, try to pull data for layer2
+    if editing_pair_base and is_double:
+        idx_layer1, idx_layer2 = pair_indexes
+        layer2_idx = None
+        if idx_layer1 is not None and idx_layer2 is not None:
+            for i in (idx_layer1, idx_layer2):
+                if i is None: continue
+                w = st.session_state["entries"][i].get("Window","")
+                if " - Layer 2" in w:
+                    layer2_idx = i
+                    break
+        if layer2_idx is not None:
+            sheer_entry = st.session_state["entries"][layer2_idx]
+            sheer_stitch_default = sheer_entry.get("Stitch Type", sheer_stitch_default)
+            sheer_w_default = sheer_entry.get("Width (inches)", sheer_w_default)
+            sheer_h_default = sheer_entry.get("Height (inches)", sheer_h_default)
+
+    sheer_stitch = st.selectbox("Sheer layer stitch type", [
+        "Pleated", "Ripple", "Eyelet",
+        'Roman Blinds 48"', 'Roman Blinds 54"',
+        "Blinds (Regular)"
+    ], index=["Pleated","Ripple","Eyelet",'Roman Blinds 48"','Roman Blinds 54"',"Blinds (Regular)"].index(sheer_stitch_default) if sheer_stitch_default in ["Pleated","Ripple","Eyelet",'Roman Blinds 48"','Roman Blinds 54"',"Blinds (Regular)"] else 0, key="sheer_stitch", disabled=not is_double)
+
+    sheer_width = st.number_input("Sheer layer width (inches)", min_value=0.0, value=float(sheer_w_default or 0.0), step=0.5, key="sheer_w", disabled=not is_double)
+    sheer_height = st.number_input("Sheer layer height (inches)", min_value=0.0, value=float(sheer_h_default or 0.0), step=0.5, key="sheer_h", disabled=not is_double)
+
+    st.markdown("---")
+    # Lining (per-window) inside the form
+    lining = st.selectbox("Lining (per window)", ["100% B/o Lining", "Normal Lining", "No Lining"], index=2, key="ui_lining")
+
+    # File uploader — keep the key "uploader" so reset logic remains unchanged
     files = st.file_uploader("Upload Images", accept_multiple_files=True, key="uploader")
 
     submit_label = "Update Window" if e_prefill else "Add Window"
     add = st.form_submit_button(submit_label)
 
+# Handle submit: Option A - edit BOTH layers together
 if add:
+    # read images (if any)
     imgs = []
     if files:
         imgs = [f.read() for f in files]
     elif e_prefill:
+        # if editing and no new files uploaded, preserve previous images for main
         imgs = e_prefill.get("Images", [])
 
-    entry = {
-        "Window": win_name or "Window",
-        "Stitch Type": stitch,
-        "Width (inches)": width,
-        "Height (inches)": height,
-        "Quantity": calculate_quantity(stitch, width, height),
-        "Track (ft)": calculate_track_ft(width, stitch),
-        "SQFT": calculate_sqft_for_roman_or_regular(width, height, stitch),
-        "Panels": calculate_panels(stitch, width),
-        "Images": imgs
-    }
+    # If sheer inputs disabled (not double) mirror main values
+    if not is_double:
+        sheer_width_val = float(main_width)
+        sheer_height_val = float(main_height)
+        sheer_stitch_val = main_stitch
+    else:
+        sheer_width_val = float(st.session_state.get("sheer_w", 0.0)) if "sheer_w" in st.session_state else float(sheer_width)
+        sheer_height_val = float(st.session_state.get("sheer_h", 0.0)) if "sheer_h" in st.session_state else float(sheer_height)
+        sheer_stitch_val = st.session_state.get("sheer_stitch", sheer_stitch) if "sheer_stitch" in st.session_state else sheer_stitch
 
-    if e_prefill:
+    # If editing a pair (Option A), update both rows (or create second if missing)
+    if e_prefill and editing_pair_base:
+        # find pair indexes again
+        idx_a, idx_b = pair_indexes
+        # find layer1 and layer2 indexes
+        layer1_idx = layer2_idx = None
+        for i in (idx_a, idx_b):
+            if i is None: continue
+            w = st.session_state["entries"][i].get("Window","")
+            if " - Layer 1" in w:
+                layer1_idx = i
+            elif " - Layer 2" in w:
+                layer2_idx = i
+        # Update/create layer1 (main)
+        entry_main = {
+            "Window": f"{win_name.strip()} - Layer 1" if is_double else win_name.strip(),
+            "Stitch Type": main_stitch,
+            "Width (inches)": float(main_width),
+            "Height (inches)": float(main_height),
+            "Quantity": calculate_quantity(main_stitch, float(main_width), float(main_height)),
+            "Track (ft)": calculate_track_ft(float(main_width), main_stitch),
+            "SQFT": calculate_sqft_for_roman_or_regular(float(main_width), float(main_height), main_stitch),
+            "Panels": calculate_panels(main_stitch, float(main_width)),
+            "Lining": lining,
+            "Images": imgs,
+            "Layer": 1
+        }
+        if layer1_idx is not None:
+            st.session_state["entries"][layer1_idx] = entry_main
+        else:
+            st.session_state["entries"].append(entry_main)
+            layer1_idx = len(st.session_state["entries"]) - 1
+
+        # Handle layer2
+        if is_double:
+            entry_sheer = {
+                "Window": f"{win_name.strip()} - Layer 2",
+                "Stitch Type": sheer_stitch_val,
+                "Width (inches)": float(sheer_width_val),
+                "Height (inches)": float(sheer_height_val),
+                "Quantity": calculate_quantity(sheer_stitch_val, float(sheer_width_val), float(sheer_height_val)),
+                "Track (ft)": calculate_track_ft(float(sheer_width_val), sheer_stitch_val),
+                "SQFT": calculate_sqft_for_roman_or_regular(float(sheer_width_val), float(sheer_height_val), sheer_stitch_val),
+                "Panels": calculate_panels(sheer_stitch_val, float(sheer_width_val)),
+                "Lining": lining,
+                "Images": imgs,
+                "Layer": 2
+            }
+            if layer2_idx is not None:
+                st.session_state["entries"][layer2_idx] = entry_sheer
+            else:
+                st.session_state["entries"].append(entry_sheer)
+        else:
+            # If user turned off double while editing, remove any existing layer2
+            if layer2_idx is not None:
+                st.session_state["entries"].pop(layer2_idx)
+        st.session_state["edit_index"] = None
+        st.success("Window (both layers) updated.")
+    elif e_prefill and not editing_pair_base:
+        # editing a single-row window (not part of a pair)
+        entry = {
+            "Window": win_name or e_prefill.get("Window", "Window"),
+            "Stitch Type": main_stitch,
+            "Width (inches)": float(main_width),
+            "Height (inches)": float(main_height),
+            "Quantity": calculate_quantity(main_stitch, float(main_width), float(main_height)),
+            "Track (ft)": calculate_track_ft(float(main_width), main_stitch),
+            "SQFT": calculate_sqft_for_roman_or_regular(float(main_width), float(main_height), main_stitch),
+            "Panels": calculate_panels(main_stitch, float(main_width)),
+            "Lining": lining,
+            "Images": imgs
+        }
         st.session_state["entries"][edit_idx] = entry
         st.session_state["edit_index"] = None
         st.success("Window updated.")
     else:
-        st.session_state["entries"].append(entry)
+        # Not editing — adding new window (create 1 or 2 rows)
+        row1 = {
+            "Window": f"{win_name.strip()} - Layer 1" if is_double else win_name.strip(),
+            "Stitch Type": main_stitch,
+            "Width (inches)": float(main_width),
+            "Height (inches)": float(main_height),
+            "Quantity": calculate_quantity(main_stitch, float(main_width), float(main_height)),
+            "Track (ft)": calculate_track_ft(float(main_width), main_stitch),
+            "SQFT": calculate_sqft_for_roman_or_regular(float(main_width), float(main_height), main_stitch),
+            "Panels": calculate_panels(main_stitch, float(main_width)),
+            "Lining": lining,
+            "Images": imgs,
+            "Layer": 1,
+            "BaseWindow": win_name.strip()
+        }
+        st.session_state["entries"].append(row1)
+
+        if is_double:
+            row2 = {
+                "Window": f"{win_name.strip()} - Layer 2",
+                "Stitch Type": sheer_stitch_val,
+                "Width (inches)": float(sheer_width_val),
+                "Height (inches)": float(sheer_height_val),
+                "Quantity": calculate_quantity(sheer_stitch_val, float(sheer_width_val), float(sheer_height_val)),
+                "Track (ft)": calculate_track_ft(float(sheer_width_val), sheer_stitch_val),
+                "SQFT": calculate_sqft_for_roman_or_regular(float(sheer_width_val), float(sheer_height_val), sheer_stitch_val),
+                "Panels": calculate_panels(sheer_stitch_val, float(sheer_width_val)),
+                "Lining": lining,
+                "Images": imgs,
+                "Layer": 2,
+                "BaseWindow": win_name.strip()
+            }
+            st.session_state["entries"].append(row2)
         st.success("Window added.")
 
-    # reset uploader
+        # -----------------------------
+        # CLEAR form fields for NEW add
+        # -----------------------------
+        # Instead of modifying the radio widget key (which may already be instantiated),
+        # set a reset flag that will be applied before widget creation on the next run.
+        st.session_state["_reset_new_form"] = True
+
+        # Clear other form widget state keys (safe to delete)
+        form_keys_to_clear = [
+            "main_w", "main_h", "main_stitch",
+            "sheer_w", "sheer_h", "sheer_stitch",
+            "ui_lining", "uploader"
+        ]
+        for k in form_keys_to_clear:
+            if k in st.session_state:
+                try:
+                    del st.session_state[k]
+                except Exception:
+                    pass
+
+    # reset uploader state to clear widget (redundant but safe)
     if "uploader" in st.session_state:
         try:
             del st.session_state["uploader"]
         except Exception:
             pass
 
-    # after add/update show cleared form (or unprefilled)
+    # rerun to refresh UI
     st.rerun()
 
 # -------------------------
@@ -507,14 +795,17 @@ if st.session_state["entries"]:
     for idx, e in enumerate(st.session_state["entries"]):
         df_display.append({
             "Index": idx,
-            "Window": e["Window"],
-            "Stitch Type": e["Stitch Type"],
-            "Width (inches)": e["Width (inches)"],
-            "Height (inches)": e["Height (inches)"],
-            "Quantity": round(e["Quantity"], 2) if is_number(e["Quantity"]) else e["Quantity"],
-            "Track (ft)": e["Track (ft)"] if e["Track (ft)"] is not None else "None",
-            "SQFT": e["SQFT"] if e["SQFT"] is not None else "None",
-            "Panels": e["Panels"] if e["Panels"] is not None else "None",
+            "Window": e.get("Window", ""),
+            "BaseWindow": e.get("BaseWindow", ""),
+            "Layer": e.get("Layer", 1),
+            "Stitch Type": e.get("Stitch Type", ""),
+            "Lining": e.get("Lining", "No Lining"),
+            "Width (inches)": e.get("Width (inches)", 0),
+            "Height (inches)": e.get("Height (inches)", 0),
+            "Quantity": round(e.get("Quantity", 0), 2) if is_number(e.get("Quantity", 0)) else e.get("Quantity"),
+            "Track (ft)": e.get("Track (ft)"),
+            "SQFT": e.get("SQFT"),
+            "Panels": e.get("Panels"),
             "Images": len(e.get("Images", []))
         })
 
@@ -533,6 +824,7 @@ if st.session_state["entries"]:
 
     if col2.button("Delete Selected"):
         removed = st.session_state["entries"].pop(selected_row)
+        # If we deleted a layer that belonged to a pair, edit_index may no longer be valid
         if st.session_state.get("edit_index") == selected_row:
             st.session_state["edit_index"] = None
         st.success(f"Deleted window: {removed.get('Window','(unknown)')}")
@@ -542,16 +834,20 @@ if st.session_state["entries"]:
     total_qty = total_track = total_sqft = 0
     total_panels = 0
     for e in st.session_state["entries"]:
-        if is_number(e["Quantity"]): total_qty += e["Quantity"]
-        if is_number(e["Track (ft)"]): total_track += e["Track (ft)"]
-        if is_number(e["SQFT"]): total_sqft += e["SQFT"]
-        if is_number(e["Panels"]): total_panels += e["Panels"]
+        q = e.get("Quantity") or 0
+        if is_number(q): total_qty += q
+        t = e.get("Track (ft)")
+        if is_number(t): total_track += t
+        s = e.get("SQFT") or 0
+        if is_number(s): total_sqft += s
+        p = e.get("Panels") or 0
+        if is_number(p): total_panels += p
 
     colA, colB, colC, colD = st.columns(4)
-    colA.metric("Total Quantity", round(total_qty, 2))
-    colB.metric("Total Track (ft)", round(total_track, 2))
-    colC.metric("Total SQFT", round(total_sqft, 2))
-    colD.metric("Total Panels", total_panels)
+    colA.metric("Total Quantity", round(total_qty,2))
+    colB.metric("Total Track (ft)", round(total_track,2))
+    colC.metric("Total SQFT", round(total_sqft,2) if total_sqft else "N/A")
+    colD.metric("Total Panels", round(total_panels,2))
 
     if st.button("Reset All"):
         st.session_state["entries"] = []
