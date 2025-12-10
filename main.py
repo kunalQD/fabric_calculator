@@ -703,21 +703,66 @@ if add:
         st.success("Window (both layers) updated.")
     elif e_prefill and not editing_pair_base:
         # editing a single-row window (not part of a pair)
-        entry = {
-            "Window": win_name or e_prefill.get("Window", "Window"),
-            "Stitch Type": main_stitch,
-            "Width (inches)": float(main_width),
-            "Height (inches)": float(main_height),
-            "Quantity": calculate_quantity(main_stitch, float(main_width), float(main_height)),
-            "Track (ft)": calculate_track_ft(float(main_width), main_stitch),
-            "SQFT": calculate_sqft_for_roman_or_regular(float(main_width), float(main_height), main_stitch),
-            "Panels": calculate_panels(main_stitch, float(main_width)),
-            "Lining": lining,
-            "Images": imgs
-        }
-        st.session_state["entries"][edit_idx] = entry
-        st.session_state["edit_index"] = None
-        st.success("Window updated.")
+        # If user enabled double while editing, convert this single row into a pair:
+        if is_double:
+            # build main (Layer 1) entry from main inputs
+            entry_main = {
+                "Window": f"{win_name.strip()} - Layer 1",
+                "Stitch Type": main_stitch,
+                "Width (inches)": float(main_width),
+                "Height (inches)": float(main_height),
+                "Quantity": calculate_quantity(main_stitch, float(main_width), float(main_height)),
+                "Track (ft)": calculate_track_ft(float(main_width), main_stitch),
+                "SQFT": calculate_sqft_for_roman_or_regular(float(main_width), float(main_height), main_stitch),
+                "Panels": calculate_panels(main_stitch, float(main_width)),
+                "Lining": lining,
+                "Images": imgs or e_prefill.get("Images", []),
+                "Layer": 1,
+                "BaseWindow": win_name.strip()
+            }
+
+            # build sheer (Layer 2) entry from sheer values (mirror if user didn't modify)
+            entry_sheer = {
+                "Window": f"{win_name.strip()} - Layer 2",
+                "Stitch Type": sheer_stitch_val,
+                "Width (inches)": float(sheer_width_val),
+                "Height (inches)": float(sheer_height_val),
+                "Quantity": calculate_quantity(sheer_stitch_val, float(sheer_width_val), float(sheer_height_val)),
+                "Track (ft)": calculate_track_ft(float(sheer_width_val), sheer_stitch_val),
+                "SQFT": calculate_sqft_for_roman_or_regular(float(sheer_width_val), float(sheer_height_val), sheer_stitch_val),
+                "Panels": calculate_panels(sheer_stitch_val, float(sheer_width_val)),
+                "Lining": lining,
+                # keep images empty for sheer if user didn't upload separate ones;
+                # if you want to duplicate images to the sheer layer, set to imgs or e_prefill.get("Images", [])
+                "Images": [],
+                "Layer": 2,
+                "BaseWindow": win_name.strip()
+            }
+
+            # Replace the existing single-row entry with entry_main and insert entry_sheer after it
+            st.session_state["entries"][edit_idx] = entry_main
+            # Insert layer2 right after the updated row so ordering is sensible
+            st.session_state["entries"].insert(edit_idx + 1, entry_sheer)
+
+            st.session_state["edit_index"] = None
+            st.success("Window updated and converted to double layer.")
+        else:
+            # still single — normal update
+            entry = {
+                "Window": win_name or e_prefill.get("Window", "Window"),
+                "Stitch Type": main_stitch,
+                "Width (inches)": float(main_width),
+                "Height (inches)": float(main_height),
+                "Quantity": calculate_quantity(main_stitch, float(main_width), float(main_height)),
+                "Track (ft)": calculate_track_ft(float(main_width), main_stitch),
+                "SQFT": calculate_sqft_for_roman_or_regular(float(main_width), float(main_height), main_stitch),
+                "Panels": calculate_panels(main_stitch, float(main_width)),
+                "Lining": lining,
+                "Images": imgs or e_prefill.get("Images", [])
+            }
+            st.session_state["entries"][edit_idx] = entry
+            st.session_state["edit_index"] = None
+            st.success("Window updated.")
     else:
         # Not editing — adding new window (create 1 or 2 rows)
         row1 = {
