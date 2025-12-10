@@ -70,10 +70,10 @@ def calculate_quantity(stitch, width, height):
         return round(width / 24) * h
     if stitch == 'Roman Blinds 48"':
         panels = math.ceil(width / 44)
-        return round(panels * h)
+        return round(panels * h, 2)
     if stitch == 'Roman Blinds 54"':
         panels = math.ceil(width / 50)
-        return round(panels * h)
+        return round(panels * h, 2)
     return 0
 
 def calculate_track_ft(width, stitch):
